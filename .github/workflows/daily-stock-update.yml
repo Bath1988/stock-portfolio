@@ -1,0 +1,121 @@
+name: Daily Stock Data Update
+
+on:
+  schedule:
+    # Run at 13:00 UTC daily - this covers Australian midnight across DST changes
+    # AEDT (Oct-Apr): 13:00 UTC = 00:00 AEDT (midnight)
+    # AEST (Apr-Oct): 13:00 UTC = 23:00 AEST (11 PM) - script will wait for midnight
+    - cron: '0 13 * * *'
+  
+  # Allow manual triggering
+  workflow_dispatch:
+
+jobs:
+  update-stock-data:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Create credentials file
+      run: |
+        echo "RAPIDAPI_KEY=${{ secrets.RAPIDAPI_KEY }}" > credentials.txt
+        echo "RAPIDAPI_HOST=${{ secrets.RAPIDAPI_HOST }}" >> credentials.txt
+    
+    - name: Check Australian Eastern Time
+      id: timezone_check
+      run: |
+        python3 -c "
+        import pytz
+        from datetime import datetime
+        
+        # Get current time in Australian Eastern timezone
+        au_tz = pytz.timezone('Australia/Sydney')
+        au_time = datetime.now(au_tz)
+        
+        # Check if it's between 23:45 and 00:15 (30-minute window around midnight)
+        hour = au_time.hour
+        minute = au_time.minute
+        
+        is_midnight_window = (hour == 23 and minute >= 45) or (hour == 0 and minute <= 15)
+        
+        print(f'Current AU time: {au_time.strftime(\"%Y-%m-%d %H:%M:%S %Z\")}')
+        print(f'Hour: {hour}, Minute: {minute}')
+        print(f'Is midnight window: {is_midnight_window}')
+        
+        # Use newer GitHub Actions syntax
+        import os
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+            f.write(f'should_run={str(is_midnight_window).lower()}\n')
+            f.write(f'au_time={au_time.strftime(\"%Y-%m-%d %H:%M:%S %Z\")}\n')
+        "
+    
+    - name: Display timezone info
+      run: |
+        echo "Australian time: ${{ steps.timezone_check.outputs.au_time }}"
+        echo "Should run: ${{ steps.timezone_check.outputs.should_run }}"
+        echo "Trigger event: ${{ github.event_name }}"
+    
+    - name: Run data fetch and plot generation
+      if: steps.timezone_check.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch'
+      run: |
+        echo "🔄 Starting stock data update..."
+        cd backend
+        python compare_trends.py
+        echo "✅ Data processing completed"
+    
+    - name: List generated files
+      if: steps.timezone_check.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch'
+      run: |
+        echo "📊 Generated data files:"
+        ls -la Data/
+        echo "📈 Generated plot files:"
+        ls -la docs/plots/
+    
+    - name: Configure Git
+      if: steps.timezone_check.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch'
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action Bot"
+    
+    - name: Commit and push changes
+      if: steps.timezone_check.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch'
+      run: |
+        # Add all data and plot files
+        git add Data/output_all_companies.csv
+        git add docs/plots/*.png
+        git add docs/plots/stats.json
+        
+        # Check if there are changes to commit
+        if ! git diff --staged --quiet; then
+          # Get current Australian time for commit message
+          AU_TIME=$(TZ='Australia/Sydney' date '+%Y-%m-%d %H:%M:%S %Z')
+          git commit -m "🤖 Auto-update stock data and plots - $AU_TIME
+          
+          📊 Updated files:
+          - Stock price data (CSV)
+          - All plot images (PNG)
+          - Statistics (JSON)
+          
+          🕛 Triggered at: $AU_TIME"
+          
+          git push
+          echo "✅ Successfully committed and pushed stock data updates"
+        else
+          echo "ℹ️ No changes detected - data is already up to date"
+        fi
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
